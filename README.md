@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://easyslip.com/" target="blank"><img src="https://www.kasikornbank.com/SiteCollectionDocuments/kbiz2023/assets/theme/img/k-biz-2.svg" width="200" height="200" alt="EasySlip Logo" /></a>
+  <a href="https://www.kasikornbank.com/th/kbiz/pages/index.aspx" target="blank"><img src="./KBiz-Logo.svg" width="200" height="200" alt="KBiz Logo" /></a>
 </p>
 
 ## 👋 Description
