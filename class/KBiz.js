@@ -100,14 +100,14 @@ class KBiz {
         }
       );
 
-      const transactionDetails = await Promise.all(
-        recentTransactionList.map(transaction => 
-          this.getRecentTransactionDetail(
-            transaction.transDate, transaction.origRqUid, transaction.originalSourceId, 
-            transaction.debitCreditIndicator, transaction.transCode, transaction.transType
-          ).then(detail => ({ ...transaction, detail: detail.data }))
-        )
-      );
+      const transactionDetails = [];
+      for (const transaction of recentTransactionList) {
+        const detail = await this.getRecentTransactionDetail(
+          transaction.transDate, transaction.origRqUid, transaction.originalSourceId, 
+          transaction.debitCreditIndicator, transaction.transCode, transaction.transType
+        );
+        transactionDetails.push({ ...transaction, detail: detail.data });
+      }
 
       return transactionDetails;
     } catch (error) {
