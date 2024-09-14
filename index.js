@@ -25,7 +25,7 @@ const KBiz = require("./class/KBiz.js");
           console.log(`Account: ${accountId} | Account Name: ${accountNameTh} | Balance: ${accountBalance} Baht`);
         }
   
-        const transactionList = await kBizClient.getTransactionList(100);
+        const transactionList = await kBizClient.getTransactionList(100, "01/09/2024", "14/09/2024"); // or await kBizClient.getTransactionList(100);
         console.log(transactionList)
       } else {
         console.log("Session is dead.");
