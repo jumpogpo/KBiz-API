@@ -34,6 +34,10 @@ $ npm i
 $ node index.js
 ```
 
+## 📝 License
+
+This project is licensed under the GNU General Public License v3.0. For more details, please refer to the [LICENSE](LICENSE) file.
+
 ## 🤝 Reference
 
 - KBiz - [https://www.kasikornbank.com/th/kbiz/pages/index.aspx](https://www.kasikornbank.com/th/kbiz/pages/index.aspx)
