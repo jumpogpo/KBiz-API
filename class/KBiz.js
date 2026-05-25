@@ -1,68 +1,116 @@
 const axios = require("axios");
 
-axios.defaults.baseURL = "https://kbiz.kasikornbank.com";
+const BASE_URL = "https://kbiz.kasikornbank.com";
+const CUST_TYPE = "IX";
+const OWNER_TYPE = "Company";
+const ACCT_TYPE_SAVING = "SA";
+const LOCALE = "th";
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 500;
 
-const formUrlEncoded = (obj) =>
-  Object.entries(obj)
-    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
-    .join("&");
+const ENDPOINTS = {
+  loginAuthen: "/authen/loginAuthen.do",
+  redirectToIB: "/authen/ib/redirectToIB.jsp",
+  validateSession: "/services/api/authentication/validateSession",
+  refreshSession: "/services/api/refreshSession",
+  accountSummary: "/services/api/accountsummary/getAccountSummaryList",
+  recentTransactionList: "/services/api/accountsummary/getRecentTransactionList",
+  recentTransactionDetail: "/services/api/accountsummary/getRecentTransactionDetail",
+};
 
-function getCookieByName(cookies, name) {
-  const cookie = cookies
-    .map(cookie => cookie.split(";")[0].split("="))
-    .find(([cookieName]) => cookieName.trim() === name);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  return cookie ? cookie[1] : null;
-}
+const formatDateDMY = (date = new Date()) =>
+  [
+    String(date.getDate()).padStart(2, "0"),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    date.getFullYear(),
+  ].join("/");
+
+const parseSetCookies = (setCookieHeader = []) => {
+  const cookies = new Map();
+  for (const entry of setCookieHeader) {
+    const [pair] = entry.split(";");
+    const eq = pair.indexOf("=");
+    if (eq === -1) continue;
+    cookies.set(pair.slice(0, eq).trim(), pair.slice(eq + 1));
+  }
+  return cookies;
+};
+
+const extractBetween = (str, start, end) => {
+  const startIdx = str.indexOf(start);
+  if (startIdx === -1) return null;
+  const from = startIdx + start.length;
+  const endIdx = str.indexOf(end, from);
+  return endIdx === -1 ? null : str.substring(from, endIdx);
+};
 
 class KBiz {
+  #client;
+
   constructor({ username, password, bankAccountNumber, ibId, token } = {}) {
-    // Check required fields
-    [{ fieldName: 'username', value: username }, 
-      { fieldName: 'password', value: password }, 
-      { fieldName: 'bankAccountNumber', value: bankAccountNumber }]
-    .forEach(({ fieldName, value }) => {
-      if (value == undefined || value.trim() === '') {
-        throw new Error(`${fieldName} is required.`);
+    for (const [field, value] of Object.entries({ username, password, bankAccountNumber })) {
+      if (value == null || String(value).trim() === "") {
+        throw new Error(`${field} is required.`);
       }
-    });
+    }
 
     this.username = username;
     this.password = password;
     this.bankAccountNumber = bankAccountNumber;
-    this.ibId = ibId;
-    this.token = token;
+    this.ibId = ibId ?? null;
+    this.token = token ?? null;
 
-    if (this.token) axios.defaults.headers.common["Authorization"] = this.token;
-    if (this.ibId) axios.defaults.headers.common["X-IB-ID"] = this.ibId;
+    this.#client = axios.create({ baseURL: BASE_URL });
+    if (this.token) this.#client.defaults.headers.common.Authorization = this.token;
+    if (this.ibId) this.#client.defaults.headers.common["X-IB-ID"] = this.ibId;
   }
 
   async login() {
     try {
-      const { headers: createCookieHeaders, data: loginPageData } = await axios.post("/authen/login.do");
-      const alteonP = getCookieByName(createCookieHeaders['set-cookie'], 'AlteonP');
-      const jSessionId = getCookieByName(createCookieHeaders['set-cookie'], 'JSESSIONID');
-      const tokenId = this.extractBetween(loginPageData, `id="tokenId" value="`, `"/>`);
+      const initRes = await this.#client.post(ENDPOINTS.loginAuthen);
+      const initCookies = parseSetCookies(initRes.headers["set-cookie"]);
+      const alteonP = initCookies.get("AlteonP");
+      const jSessionId = initCookies.get("JSESSIONID");
 
-      const loginResponse = await axios.post(
-        "/authen/login.do",
-        formUrlEncoded({ userName: this.username, password: this.password, tokenId, cmd: "authenticate", locale: "th" }),
-        { headers: { 'Cookie': `AlteonP=${alteonP}; JSESSIONID=${jSessionId}` } }
-      );
+      const tokenId = extractBetween(initRes.data, 'id="tokenId" value="', '"/>');
+      if (!tokenId) throw new Error("Failed to extract tokenId from login page.");
 
-      if (loginResponse.headers['set-cookie'] == undefined) throw new Error("Can't find set-cookie in response headers. Please re-check your username and password.");
+      const body = new URLSearchParams({
+        userName: this.username,
+        password: this.password,
+        tokenId,
+        cmd: "authenticate",
+        locale: LOCALE,
+      }).toString();
 
-      const rssoJSessionId = getCookieByName(loginResponse.headers['set-cookie'], 'JSESSIONID');
-      const { data } = await axios.get('/authen/ib/redirectToIB.jsp', { headers: { Cookie: `AlteonP=${alteonP}; JSESSIONID=${rssoJSessionId};` } });
-      const rsso = this.extractBetween(data, `dataRsso=`, `";`);
-      const result = await axios.post("/services/api/authentication/validateSession", { dataRsso: rsso });
-      
-      this.ibId = result.data.data.userProfiles[0].ibId;
-      this.token = result.headers["x-session-token"];
+      const loginRes = await this.#client.post(ENDPOINTS.loginAuthen, body, {
+        headers: { Cookie: `AlteonP=${alteonP}; JSESSIONID=${jSessionId}` },
+      });
 
-      axios.defaults.headers.common["Authorization"] = this.token;
-      axios.defaults.headers.common["X-IB-ID"] = this.ibId;
-      axios.defaults.headers.common["Cookie"] = `AlteonP=${alteonP};`;
+      if (!loginRes.headers["set-cookie"]) {
+        throw new Error("Login failed: missing set-cookie header. Please re-check your username and password.");
+      }
+
+      const rssoJSessionId = parseSetCookies(loginRes.headers["set-cookie"]).get("JSESSIONID");
+      const redirectRes = await this.#client.get(ENDPOINTS.redirectToIB, {
+        headers: { Cookie: `AlteonP=${alteonP}; JSESSIONID=${rssoJSessionId};` },
+      });
+
+      const dataRsso = extractBetween(redirectRes.data, "dataRsso=", '";');
+      if (!dataRsso) throw new Error("Failed to extract dataRsso from redirect page.");
+
+      const validateRes = await this.#client.post(ENDPOINTS.validateSession, { dataRsso });
+
+      this.ibId = validateRes.data.data.userProfiles[0].ibId;
+      this.token = validateRes.headers["x-session-token"];
+
+      Object.assign(this.#client.defaults.headers.common, {
+        Authorization: this.token,
+        "X-IB-ID": this.ibId,
+        Cookie: `AlteonP=${alteonP};`,
+      });
 
       return { success: true, ibId: this.ibId, token: this.token };
     } catch (error) {
@@ -72,102 +120,93 @@ class KBiz {
   }
 
   async checkSession() {
-    try {
-      await axios.post("/services/api/refreshSession", {});
-      return true;
-    } catch {
-      return this.checkSession(); // Retry on failure
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        await this.#client.post(ENDPOINTS.refreshSession, {});
+        return true;
+      } catch {
+        if (attempt < MAX_RETRIES - 1) await sleep(RETRY_DELAY_MS);
+      }
     }
+    return false;
+  }
+
+  async getUserInfo() {
+    const res = await this.#requestWithRetry(() =>
+      this.#client.post(ENDPOINTS.accountSummary, {
+        custType: CUST_TYPE,
+        isReload: "N",
+        lang: LOCALE,
+        nicknameType: "OWNAC",
+        ownerId: this.ibId,
+        ownerType: OWNER_TYPE,
+        pageAmount: 6,
+      })
+    );
+    return res?.data?.data ?? null;
   }
 
   async getTransactionList(limitRow = 7, startDate = null, endDate = null) {
-    const today = new Date();
-    const formattedDate = `${String(today.getDate()).padStart(2, "0")}/${String(today.getMonth() + 1).padStart(2, "0")}/${today.getFullYear()}`;
-    
-    try {
-      const { data: { data: { recentTransactionList } }, data } = await axios.post(
-        "/services/api/accountsummary/getRecentTransactionList",
-        {
-          acctNo: this.bankAccountNumber,
-          acctType: "SA",
-          custType: "IX",
-          endDate: endDate || formattedDate,
-          ownerId: this.ibId,
-          ownerType: "Company",
-          pageNo: "1",
-          rowPerPage: limitRow,
-          startDate: startDate || formattedDate,
-        }
-      );
+    const today = formatDateDMY();
+    const res = await this.#requestWithRetry(() =>
+      this.#client.post(ENDPOINTS.recentTransactionList, {
+        acctNo: this.bankAccountNumber,
+        acctType: ACCT_TYPE_SAVING,
+        custType: CUST_TYPE,
+        endDate: endDate ?? today,
+        ownerId: this.ibId,
+        ownerType: OWNER_TYPE,
+        pageNo: "1",
+        rowPerPage: limitRow,
+        startDate: startDate ?? today,
+      })
+    );
 
-      const transactionDetails = [];
-      for (const transaction of recentTransactionList) {
-        const detail = await this.getRecentTransactionDetail(
-          transaction.transDate, transaction.origRqUid, transaction.originalSourceId, 
-          transaction.debitCreditIndicator, transaction.transCode, transaction.transType
-        );
-        transactionDetails.push({ ...transaction, detail: detail.data });
-      }
+    const transactions = res?.data?.data?.recentTransactionList;
+    if (!transactions) return [];
 
-      return transactionDetails;
-    } catch (error) {
-      if (!error.response) console.log(error);
-      if (error.response?.status === 401) return this.getTransactionList(limitRow, startDate, endDate);
-
-      console.error(error.response);
-      return [];
+    const result = [];
+    for (const tx of transactions) {
+      const detail = await this.getRecentTransactionDetail(tx);
+      result.push({ ...tx, detail: detail?.data ?? null });
     }
+    return result;
   }
 
-  async getRecentTransactionDetail(transDate, origRqUid, originalSourceId, debitCreditIndicator, transCode, transType) {
-    try {
-      const { data } = await axios.post("/services/api/accountsummary/getRecentTransactionDetail", {
+  async getRecentTransactionDetail(transaction) {
+    const { transDate, origRqUid, originalSourceId, debitCreditIndicator, transCode, transType } = transaction;
+    const res = await this.#requestWithRetry(() =>
+      this.#client.post(ENDPOINTS.recentTransactionDetail, {
         transDate: transDate.split(" ")[0],
         acctNo: this.bankAccountNumber,
         origRqUid,
-        custType: "IX",
+        custType: CUST_TYPE,
         originalSourceId,
         transCode,
         debitCreditIndicator,
         transType,
-        ownerType: "Company",
+        ownerType: OWNER_TYPE,
         ownerId: this.ibId,
-      });
-
-      return data;
-    } catch (error) {
-      if (!error.response) console.log(error);
-      if (error.response?.status === 401) return this.getRecentTransactionDetail(transDate, origRqUid, originalSourceId, debitCreditIndicator, transCode, transType);
-
-      console.error(error.response);
-      return null;
-    }
+      })
+    );
+    return res?.data ?? null;
   }
 
-  async getUserInfo() {
-    try {
-      const { data: { data } } = await axios.post("/services/api/accountsummary/getAccountSummaryList", {
-        custType: "IX",
-        isReload: "N",
-        lang: "th",
-        nicknameType: "OWNAC",
-        ownerId: this.ibId,
-        ownerType: "Company",
-        pageAmount: 6,
-      });
-      return data;
-    } catch (error) {
-      if (!error.response) console.log(error);
-      if (error.response?.status === 401) return this.getUserInfo();
-
-      console.error(error.response);
-      return null;
+  async #requestWithRetry(fn) {
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        const status = error.response?.status;
+        if (status === 401 && attempt < MAX_RETRIES - 1) {
+          await sleep(RETRY_DELAY_MS);
+          continue;
+        }
+        console.error(error.response?.data ?? error.response ?? error);
+        return null;
+      }
     }
-  }
-
-  extractBetween(str, start, end) {
-    const startIndex = str.indexOf(start) + start.length;
-    return str.substring(startIndex, str.indexOf(end, startIndex));
+    return null;
   }
 }
 
